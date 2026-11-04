@@ -1,23 +1,25 @@
+# manifests/ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: definition-app-ingress
+  name: echo-ingress
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
-    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
+  ingressClassName: nginx
   tls:
     - hosts:
-        - definition.k8s.util.xyz
-      secretName: definition-app-tls
+        - host_replace
+      secretName: main-page-tls
   rules:
-    - host: definition.k8s.util.xyz
+    - host: host_replace
       http:
         paths:
           - pathType: Prefix
             path: "/"
             backend:
               service:
-                name: definition-app
+                name: echo1
                 port:
                   number: 80

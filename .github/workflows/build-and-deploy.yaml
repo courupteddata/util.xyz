@@ -1,78 +1,338 @@
-name: build-and-deploy
+name: Build and deploy
 
 on:
   push:
     branches:
-      - main
+      - "**"
+  pull_request:
+    types: [closed]
+  delete:
+  schedule:
+    # Daily at 04:00 UTC (always runs against the default branch)
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: preview-${{ github.event.pull_request.head.ref || github.event.ref || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  cleanup-preview:
+    if: >
+      (github.event_name == 'pull_request' &&
+       github.event.action == 'closed') ||
+      (github.event_name == 'delete' &&
+       github.event.ref_type == 'branch' &&
+       github.event.ref != 'main')
     runs-on: ubuntu-latest
-    env:
-      DATA_COLLECTOR_IMAGE_NAME: "data-collector"
-      DATA_ANALYZER_IMAGE_NAME: "data-analyzer"
 
     steps:
-      - uses: actions/checkout@v4
-      - name: Log in to Docker Hub
-        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASWORD }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta-data-collector
-        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
-        with:
-          images: ${{ secrets.DOCKER_USERNAME }}/${{ env.DATA_COLLECTOR_IMAGE_NAME }}
-
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta-data-analyzer
-        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
-        with:
-          images: ${{ secrets.DOCKER_USERNAME }}/${{ env.DATA_ANALYZER_IMAGE_NAME }}
-
-      - name: Build and push Docker image data-collector
-        id: push-data-collector
-        uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671
-        with:
-          context: .
-          file: ./data-collector/Dockerfile
-          push: true
-          tags: ${{ steps.meta-data-collector.outputs.tags }}
-          labels: ${{ steps.meta-data-collector.outputs.labels }}
-
-      - name: Build and push Docker image data-analyzer
-        id: push-data-analyzer
-        uses: docker/build-push-action@3b5e8027fcad23fda98b2e3ac259d8d67585f671
-        with:
-          context: .
-          file: ./data-analyzer/Dockerfile
-          push: true
-          tags: ${{ steps.meta-data-analyzer.outputs.tags }}
-          labels: ${{ steps.meta-data-analyzer.outputs.labels }}
-
-      # Update manifest with correct version
-      - run: |
-          sed -i 's#image_name_replace#${{ secrets.DOCKER_USERNAME }}/${{ env.DATA_COLLECTOR_IMAGE_NAME }}@${{ steps.push-data-collector.outputs.digest }}#g' manifests/data-collector.yaml && \
-          sed -i 's#image_name_replace#${{ secrets.DOCKER_USERNAME }}/${{ env.DATA_ANALYZER_IMAGE_NAME }}@${{ steps.push-data-analyzer.outputs.digest }}#g' manifests/data-analyzer.yaml
-
-
-      - name: Kubernetes set context
-        uses: Azure/k8s-set-context@v1
+      - name: Set Kubernetes context
+        uses: Azure/k8s-set-context@v5
         with:
           method: kubeconfig
           kubeconfig: ${{ secrets.KUBE_CONFIG }}
 
+      - name: Delete preview namespace
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref || github.event.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - uses: Azure/k8s-deploy@v5
+          slug="$(
+            printf '%s' "$BRANCH" |
+              tr '[:upper:]' '[:lower:]' |
+              sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' |
+              cut -c1-40
+          )"
+
+          if [[ -z "$slug" ]]; then
+            echo "Unable to derive namespace from branch: $BRANCH" >&2
+            exit 1
+          fi
+
+          kubectl delete namespace "preview-${slug}" --ignore-not-found
+
+  build-and-deploy:
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set deployment variables
+        id: deploy
+        env:
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$BRANCH" == "main" ]]; then
+            namespace="main-app"
+            host="main-page.k8s.util.xyz"
+          else
+            slug="$(
+              printf '%s' "$BRANCH" |
+                tr '[:upper:]' '[:lower:]' |
+                sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' |
+                cut -c1-40
+            )"
+
+            if [[ -z "$slug" ]]; then
+              echo "Unable to derive namespace from branch: $BRANCH" >&2
+              exit 1
+            fi
+
+            namespace="preview-${slug}"
+            host="main-page-${slug}.dev.k8s.util.xyz"
+          fi
+
+          # The "ci-" prefix marks images created by this workflow,
+          # so the prune job only ever deletes these tags.
+          {
+            echo "namespace=${namespace}"
+            echo "host=${host}"
+            echo "tag=ci-${SHA::12}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
         with:
-          resource-group: cluster1
-          name: cluster1
-          action: deploy
-          strategy: basic
-          manifests: |
-            manifests/postgres.yaml
-            manifests/rabbitmq.yaml
-            manifests/data-collector.yaml
-            manifests/data-analyzer.yaml
-            manifests/ingress.yaml
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push data collector
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./data-collector/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/data-collector:${{ steps.deploy.outputs.tag }}
+          cache-from: type=gha,scope=data-collector
+          cache-to: type=gha,mode=max,scope=data-collector
+
+      - name: Build and push data analyzer
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./data-analyzer/Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKER_USERNAME }}/data-analyzer:${{ steps.deploy.outputs.tag }}
+          cache-from: type=gha,scope=data-analyzer
+          cache-to: type=gha,mode=max,scope=data-analyzer
+
+      - name: Render Kubernetes manifests
+        env:
+          NAMESPACE: ${{ steps.deploy.outputs.namespace }}
+          HOST: ${{ steps.deploy.outputs.host }}
+          TAG: ${{ steps.deploy.outputs.tag }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p rendered
+          cp manifests/*.yaml rendered/
+
+          find rendered -type f -name '*.yaml' -print0 |
+            xargs -0 -r sed -i \
+              -e "s|namespace_replace|${NAMESPACE}|g" \
+              -e "s|host_replace|${HOST}|g" \
+              -e "s|image_collector_replace|${DOCKER_USERNAME}/data-collector:${TAG}|g" \
+              -e "s|image_analyzer_replace|${DOCKER_USERNAME}/data-analyzer:${TAG}|g"
+
+      - name: Set Kubernetes context
+        uses: Azure/k8s-set-context@v5
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Deploy
+        env:
+          NAMESPACE: ${{ steps.deploy.outputs.namespace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl create namespace "$NAMESPACE" \
+            --dry-run=client \
+            --output=yaml |
+            kubectl apply -f -
+
+          kubectl apply \
+            --namespace "$NAMESPACE" \
+            --filename rendered/
+
+          kubectl rollout status deployment/data-collector \
+            --namespace "$NAMESPACE" \
+            --timeout=5m
+
+          kubectl rollout status deployment/data-analyzer \
+            --namespace "$NAMESPACE" \
+            --timeout=5m
+
+      - name: Report deployment URL
+        env:
+          HOST: ${{ steps.deploy.outputs.host }}
+        run: echo "Deployed https://${HOST}"
+
+  prune-images:
+    needs: build-and-deploy
+    if: >
+      !cancelled() &&
+      (github.event_name == 'schedule' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Repositories this workflow pushes to
+      REPOSITORIES: "data-collector data-analyzer"
+
+      # Only tags created by this workflow are eligible for deletion.
+      # Use '^(ci-)?[0-9a-f]{12}$' temporarily to also clean up legacy tags.
+      TAG_PATTERN: '^ci-[0-9a-f]{12}$'
+
+      # Never delete tags pushed more recently than this
+      MIN_AGE_HOURS: "24"
+
+      # Set to "true" to only log what would be deleted
+      DRY_RUN: "true"
+
+    steps:
+      - name: Set Kubernetes context
+        uses: Azure/k8s-set-context@v5
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Collect images in use
+        id: in-use
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl get deployments,pods --all-namespaces --output=json |
+            jq -r '
+              .items[]
+              | (.spec.template.spec // .spec)
+              | ((.containers // []) + (.initContainers // []))[]
+              | .image
+              | sub("^docker\\.io/"; "")
+            ' |
+            sort -u > in-use.txt
+
+          if [[ ! -s in-use.txt ]]; then
+            echo "No images found in cluster, aborting to be safe" >&2
+            exit 1
+          fi
+
+          echo "Images currently in use:"
+          cat in-use.txt
+
+      - name: Log in to Docker Hub API
+        id: hub
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          payload="$(
+            jq -n \
+              --arg u "$DOCKER_USERNAME" \
+              --arg p "$DOCKER_PASSWORD" \
+              '{identifier: $u, secret: $p}'
+          )"
+
+          token="$(
+            curl -fsS -X POST "https://hub.docker.com/v2/auth/token" \
+              -H "Content-Type: application/json" \
+              -d "$payload" |
+              jq -r '.access_token'
+          )"
+
+          if [[ -z "$token" || "$token" == "null" ]]; then
+            echo "Failed to obtain Docker Hub token" >&2
+            exit 1
+          fi
+
+          echo "::add-mask::${token}"
+          echo "token=${token}" >> "$GITHUB_OUTPUT"
+
+      - name: Delete unused tags
+        env:
+          TOKEN: ${{ steps.hub.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cutoff="$(date -u -d "-${MIN_AGE_HOURS} hours" +%s)"
+
+          for repo in $REPOSITORIES; do
+            api="https://hub.docker.com/v2/repositories/${DOCKER_USERNAME}/${repo}/tags"
+            echo "::group::${repo}"
+
+            # Collect all tags first; deleting while paginating skips entries
+            : > tags.tsv
+            url="${api}?page_size=100"
+
+            while [[ -n "$url" && "$url" != "null" ]]; do
+              page="$(curl -fsS -H "Authorization: Bearer ${TOKEN}" "$url")"
+
+              jq -r '
+                .results[]
+                | "\(.name)\t\(.tag_last_pushed // .last_updated)"
+              ' <<< "$page" >> tags.tsv
+
+              url="$(jq -r '.next' <<< "$page")"
+            done
+
+            while IFS=$'\t' read -r tag pushed; do
+              [[ -n "$tag" ]] || continue
+
+              image="${DOCKER_USERNAME}/${repo}:${tag}"
+
+              # Only touch tags created by this workflow
+              if [[ ! "$tag" =~ $TAG_PATTERN ]]; then
+                echo "skip (not ours):  ${image}"
+                continue
+              fi
+
+              # Keep anything currently deployed
+              if grep -qxF "$image" in-use.txt; then
+                echo "keep (in use):    ${image}"
+                continue
+              fi
+
+              # Keep recently pushed tags (may belong to an in-progress deploy)
+              if (( $(date -u -d "$pushed" +%s) >= cutoff )); then
+                echo "keep (recent):    ${image}"
+                continue
+              fi
+
+              if [[ "$DRY_RUN" == "true" ]]; then
+                echo "would delete:     ${image}"
+              else
+                echo "delete:           ${image}"
+                curl -fsS -X DELETE \
+                  -H "Authorization: Bearer ${TOKEN}" \
+                  "${api}/${tag}/"
+              fi
+            done < tags.tsv
+
+            echo "::endgroup::"
+          done
