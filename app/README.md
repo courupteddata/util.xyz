@@ -16,12 +16,22 @@ Dioxus fullstack landing page for hosted services.
 ## Local development
 
 ```bash
-V=$(curl -s https://api.github.com/repos/gchq/CyberChef/releases/latest | jq -r .tag_name)
-curl -fsSL -o cc.zip "https://github.com/gchq/CyberChef/releases/download/$V/CyberChef_$V.zip"
-mkdir -p cyberchef && unzip -q cc.zip -d cyberchef && mv "cyberchef/CyberChef_$V.html" cyberchef/index.html
-rm cc.zip
+URL=$(curl -s https://api.github.com/repos/gchq/CyberChef/releases/latest |
+  jq -r '[.assets[] | select(.name | test("^CyberChef_.*\\.zip$"))] | first | .browser_download_url')
+
+rm -rf cyberchef && mkdir cyberchef
+curl -fsSL -o cc.zip "$URL" && unzip -q cc.zip -d cyberchef && rm cc.zip
+mv "$(find cyberchef -maxdepth 1 -name 'CyberChef*.html' | head -n1)" cyberchef/index.html
 
 dx serve
+```
+
+Local docker build
+```bash
+URL=$(curl -s https://api.github.com/repos/gchq/CyberChef/releases/latest |
+  jq -r '[.assets[] | select(.name | test("^CyberChef_.*\\.zip$"))] | first | .browser_download_url')
+docker build --build-arg CYBERCHEF_URL="$URL" -t main-page:local .
+docker run --rm -p 8080:8080 main-page:local
 ```
 
 Set `CYBERCHEF_DIR` to use a different CyberChef location.

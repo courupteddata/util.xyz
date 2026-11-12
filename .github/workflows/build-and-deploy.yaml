@@ -105,12 +105,20 @@ jobs:
         run: |
           set -euo pipefail
 
-          version="$(
+          release="$(
             curl -fsSL \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/gchq/CyberChef/releases/latest |
-              jq -r '.tag_name'
+              https://api.github.com/repos/gchq/CyberChef/releases/latest
+          )"
+
+          version="$(jq -r '.tag_name' <<< "$release")"
+          url="$(
+            jq -r '
+              [.assets[] | select(.name | test("^CyberChef_.*\\.zip$"))]
+              | first
+              | .browser_download_url // empty
+            ' <<< "$release"
           )"
 
           if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -118,8 +126,17 @@ jobs:
             exit 1
           fi
 
+          if [[ ! "$url" =~ ^https://github\.com/gchq/CyberChef/releases/download/ ]]; then
+            echo "No CyberChef zip asset found for $version (got: '$url')" >&2
+            exit 1
+          fi
+
           echo "Latest CyberChef: $version"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Asset: $url"
+          {
+            echo "version=${version}"
+            echo "url=${url}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set deployment variables
         id: deploy
@@ -177,7 +194,7 @@ jobs:
           file: ./Dockerfile
           push: true
           build-args: |
-            CYBERCHEF_VERSION=${{ steps.cyberchef.outputs.version }}
+            CYBERCHEF_URL=${{ steps.cyberchef.outputs.url }}
           tags: ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_REPO }}:${{ steps.deploy.outputs.tag }}
           cache-from: type=gha,scope=main-page
           cache-to: type=gha,mode=max,scope=main-page

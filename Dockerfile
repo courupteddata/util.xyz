@@ -28,16 +28,25 @@ RUN dx bundle --platform web --release \
  && cp -r "$out_dir/public" /out/public
 
 # ---------- Fetch CyberChef release ----------
+# ---------- Fetch CyberChef release ----------
 FROM alpine:3 AS cyberchef
 
-ARG CYBERCHEF_VERSION
+ARG CYBERCHEF_URL
 RUN apk add --no-cache curl unzip \
- && test -n "$CYBERCHEF_VERSION" \
- && curl -fsSL -o /tmp/cc.zip \
-    "https://github.com/gchq/CyberChef/releases/download/${CYBERCHEF_VERSION}/CyberChef_${CYBERCHEF_VERSION}.zip" \
+ && test -n "$CYBERCHEF_URL" \
+ && curl -fsSL -o /tmp/cc.zip "$CYBERCHEF_URL" \
  && mkdir /cyberchef \
  && unzip -q /tmp/cc.zip -d /cyberchef \
- && mv "/cyberchef/CyberChef_${CYBERCHEF_VERSION}.html" /cyberchef/index.html
+ # Locate the main HTML file (name isn't guaranteed to match the tag)
+ && html="$(find /cyberchef -maxdepth 2 -type f -name 'CyberChef*.html' | head -n1)" \
+ && test -n "$html" \
+ # Flatten if the zip contains a top-level folder
+ && dir="$(dirname "$html")" \
+ && if [ "$dir" != "/cyberchef" ]; then \
+      mv "$dir"/* /cyberchef/ && rmdir "$dir" && html="/cyberchef/$(basename "$html")"; \
+    fi \
+ && mv "$html" /cyberchef/index.html \
+ && ls -la /cyberchef
 
 # ---------- Runtime ----------
 FROM gcr.io/distroless/cc-debian13:nonroot
