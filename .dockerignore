@@ -1,0 +1,7 @@
+app/target
+app/cyberchef
+.git
+.github
+manifests
+rendered
+**/README.md
