@@ -5,17 +5,26 @@ const MAIN_CSS: Asset = asset!("/assets/main.css");
 // Static CyberChef files, mounted by the server below
 const CYBERCHEF_URL: &str = "/cyberchef-app/";
 
-#[derive(Routable, Clone, PartialEq, Debug)]
-#[rustfmt::skip]
-enum Route {
-    #[layout(Shell)]
-        #[route("/")]
-        Home {},
-        #[route("/cyberchef")]
-        CyberChef {},
-        #[route("/:..segments")]
-        NotFound { segments: Vec<String> },
+// The Routable derive generates code that triggers `unreachable_code`
+// (with the catch-all route). Scope to just the router.
+#[allow(unreachable_code)]
+mod routes {
+    use super::*;
+
+    #[derive(Routable, Clone, PartialEq, Debug)]
+    #[rustfmt::skip]
+    pub enum Route {
+        #[layout(Shell)]
+            #[route("/")]
+            Home {},
+            #[route("/cyberchef")]
+            CyberChef {},
+            #[route("/:..segments")]
+            NotFound { segments: Vec<String> },
+    }
 }
+
+use routes::Route;
 
 /// Hosted services shown on the landing page and in the nav.
 /// Add new services here.
