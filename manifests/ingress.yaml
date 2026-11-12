@@ -1,16 +1,18 @@
-# manifests/ingress.yaml
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: echo-ingress
+  name: main-page-ingress
   annotations:
     cert-manager.io/cluster-issuer: "letsencrypt-prod"
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Redirects www.<host> -> <host> when www is in the TLS hosts
+    nginx.ingress.kubernetes.io/from-to-www-redirect: "true"
 spec:
   ingressClassName: nginx
   tls:
     - hosts:
         - host_replace
+        - www_alias_replace
       secretName: main-page-tls
   rules:
     - host: host_replace
@@ -20,6 +22,6 @@ spec:
             path: "/"
             backend:
               service:
-                name: echo1
+                name: main-page
                 port:
                   number: 80
